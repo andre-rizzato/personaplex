@@ -16,5 +16,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [ gpu ]
+    shm_size: '8gb'
     volumes:
       - ./.cache:/root/.cache

@@ -43,7 +43,6 @@ import numpy as np
 import sentencepiece
 import sphn
 import torch
-import random
 
 from .client_utils import make_log, colorize
 from .models import loaders, MimiModel, LMModel, LMGen
@@ -168,7 +167,7 @@ class ServerState:
             else:
                 self.lm_gen.load_voice_prompt(voice_prompt_path)
         self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(request.query["text_prompt"])) if len(request.query["text_prompt"]) > 0 else None
-        seed = int(request["seed"]) if "seed" in request.query else None
+        seed = int(request.query["seed"]) if "seed" in request.query else None
 
         async def recv_loop():
             nonlocal close
@@ -265,28 +264,74 @@ class ServerState:
             self.mimi.reset_streaming()
             self.other_mimi.reset_streaming()
             self.lm_gen.reset_streaming()
+
+            # Send handshake immediately so the client knows it's connected.
+            await ws.send_bytes(b"\x00")
+            clog.log("info", "sent handshake bytes")
+
             async def is_alive():
                 if close or ws.closed:
                     return False
+                # Send a ping to keep the client connection alive
+                # during lengthy CPU-based system prompt processing.
                 try:
-                    # Check for disconnect without waiting too long
-                    msg = await asyncio.wait_for(ws.receive(), timeout=0.01)
-                    if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                        return False
-                except asyncio.TimeoutError:
-                    # No messages → client probably still alive
-                    return True
-                except aiohttp.ClientConnectionError:
+                    await ws.send_bytes(b"\x06")
+                except Exception:
                     return False
-                return True
-            # Reuse mimi for encoding voice prompt and then reset it before conversation starts
-            await self.lm_gen.step_system_prompts_async(self.mimi, is_alive=is_alive)
+                return not ws.closed
+
+            # --- Progress-reporting system prompt processing ---
+            import json as _json
+
+            async def send_progress(step: str, status: str, detail: str = "", elapsed: float = 0.0):
+                """Send a metadata message with progress info to the client."""
+                if ws.closed:
+                    return
+                payload = _json.dumps({
+                    "kind": "progress",
+                    "step": step,
+                    "status": status,
+                    "detail": detail,
+                    "elapsed": round(elapsed, 2),
+                }).encode("utf-8")
+                try:
+                    await ws.send_bytes(b"\x04" + payload)
+                except Exception:
+                    pass
+
+            import time as _time
+            steps = [
+                ("voice_prompt", "Loading voice prompt",
+                 lambda: self.lm_gen._step_voice_prompt_async(self.mimi, is_alive=is_alive)),
+                ("audio_silence_1", "Audio silence (post-voice)",
+                 lambda: self.lm_gen._step_audio_silence_async(is_alive=is_alive)),
+                ("text_prompt", "Loading text prompt",
+                 lambda: self.lm_gen._step_text_prompt_async(is_alive=is_alive)),
+                ("audio_silence_2", "Audio silence (post-text)",
+                 lambda: self.lm_gen._step_audio_silence_async(is_alive=is_alive)),
+            ]
+
+            total_start = _time.monotonic()
+            await send_progress("init", "started", f"0/{len(steps)} steps", 0.0)
+            for idx, (step_id, step_label, step_fn) in enumerate(steps):
+                step_start = _time.monotonic()
+                await send_progress(step_id, "running", f"Step {idx+1}/{len(steps)}: {step_label}",
+                                    _time.monotonic() - total_start)
+                clog.log("info", f"step {idx+1}/{len(steps)}: {step_label}")
+                await step_fn()
+                step_elapsed = _time.monotonic() - step_start
+                await send_progress(step_id, "done", f"{step_label} ({step_elapsed:.1f}s)",
+                                    _time.monotonic() - total_start)
+                clog.log("info", f"step {idx+1}/{len(steps)}: {step_label} done in {step_elapsed:.1f}s")
+
+            total_elapsed = _time.monotonic() - total_start
+            await send_progress("ready", "done", f"All steps complete ({total_elapsed:.1f}s)",
+                                total_elapsed)
+            clog.log("info", f"system prompts done in {total_elapsed:.1f}s")
+
             self.mimi.reset_streaming()
             clog.log("info", "done with system prompts")
-            # Send the handshake.
-            if await is_alive():
-                await ws.send_bytes(b"\x00")
-                clog.log("info", "sent handshake bytes")
+            if not ws.closed:
                 # Clean cancellation manager
                 tasks = [
                     asyncio.create_task(recv_loop()),

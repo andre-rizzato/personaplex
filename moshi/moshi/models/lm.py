@@ -36,7 +36,7 @@ from os.path import splitext
 import logging
 import numpy as np
 import sys
-from typing import Optional, Union, List, Tuple, Callable, Iterator
+from typing import Optional, Union, List, Tuple, Iterator
 import sphn
 import torch
 from tqdm.auto import tqdm
@@ -597,46 +597,47 @@ def create_loss_report(
     report["forced_tokens"] = target.clone()
 
     # Text Channel
+    original_target = target
     text_logits = text_logits.squeeze(dim=1).squeeze(dim=1)
-    target = target[:, 0].squeeze(1).clone()
+    text_target = original_target[:, 0].squeeze(1).clone()
 
     text_probs = torch.softmax(text_logits, dim=-1)
     text_ranks = torch.argsort(text_probs, dim=-1, descending=True)
     for b in range(B):
-        forced_token = target[b].item()
+        forced_token = text_target[b].item()
         try:
             rank = (text_ranks[b] == forced_token).nonzero().item()
         except RuntimeError:
             rank = lm_model.zero_token_id
         report["ranks_of_forced"][b, 0] = rank
 
-    target[target == lm_model.text_initial_token_id] = -100
+    text_target[text_target == lm_model.text_initial_token_id] = -100
     text_loss = torch.nn.functional.cross_entropy(
         text_logits,
-        target,
+        text_target,
         ignore_index=-100,
         )
     report["losses"][:, 0] = text_loss
 
     # Audio Channels
     for k in range(lm_model.dep_q):
-        target = target[:, k+1].squeeze(1).clone()
+        audio_target = original_target[:, k+1].squeeze(1).clone()
         channel_logits = audio_logits[:, k, :]
 
         audio_probs = torch.softmax(channel_logits, dim=-1)
         audio_ranks = torch.argsort(audio_probs, dim=-1, descending=True)
         for b in range(B):
-            forced_token = target[b].item()
+            forced_token = audio_target[b].item()
             try:
                 rank = (audio_ranks[b] == forced_token).nonzero().item()
             except RuntimeError:
                 rank = lm_model.zero_token_id
             report["ranks_of_forced"][b, k + 1] = rank
 
-        target[target == lm_model.initial_token_id] = -100
+        audio_target[audio_target == lm_model.initial_token_id] = -100
         audio_loss = torch.nn.functional.cross_entropy(
             channel_logits,
-            target,
+            audio_target,
             ignore_index=-100,
         )
         report["losses"][:, k + 1] = audio_loss

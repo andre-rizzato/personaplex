@@ -269,12 +269,13 @@ def _get_moshi_lm_with_offload(
 ) -> LMModel:
     """Load Moshi LM with CPU offloading using accelerate.
 
-    This function distributes model layers across GPU and CPU based on
-    available GPU memory. Layers that don't fit on GPU are kept on CPU
-    and moved to GPU only during forward pass.
+    This function loads the model fully on CPU first (using the same logic
+    as the non-offload path), then uses accelerate's dispatch_model to
+    split layers across GPU and CPU based on available memory.
     """
+    import gc
     try:
-        from accelerate import infer_auto_device_map, dispatch_model
+        from accelerate import dispatch_model, infer_auto_device_map
     except ImportError:
         raise ImportError(
             "CPU offloading requires the 'accelerate' package. "
@@ -284,17 +285,20 @@ def _get_moshi_lm_with_offload(
     filename = str(filename)
     logger.info("Loading model with CPU offloading enabled")
 
-    # First, create model on CPU to get the architecture
-    model = LMModel(device="cpu", dtype=dtype, **lm_kwargs)
+    dev = torch.device(device) if isinstance(device, str) else device
 
-    # Load state_dict to CPU
+    # Step 1: Create model on meta device (same as non-offload path)
+    model = LMModel(device="meta", dtype=dtype, **lm_kwargs)
+
+    # Step 2: Load state_dict to CPU and apply patches
+    logger.info("Loading state dict to CPU for patching")
     if filename.endswith(".safetensors"):
         state_dict = load_file(filename, device="cpu")
     else:
         with open(filename, "rb") as f:
             state_dict = torch.load(f, map_location="cpu")
 
-    # Apply weight patches (same as non-offload path)
+    # Patch 1: expand depformer self_attn weights if needed
     model_sd = model.state_dict()
     for name, tensor in list(state_dict.items()):
         if "depformer" in name and "self_attn" in name and name in model_sd:
@@ -303,10 +307,14 @@ def _get_moshi_lm_with_offload(
                 missing = (
                     tensor
                     if copy_missing_weights
-                    else model_sd[name][tensor.shape[0]:]
+                    else torch.zeros(
+                        [model_sd[name].shape[0] - tensor.shape[0]] + list(tensor.shape[1:]),
+                        dtype=tensor.dtype, device="cpu",
+                    )
                 )
                 state_dict[name] = torch.concat([tensor, missing], dim=0)
 
+    # Patch 2: fill missing keys by copying 0..7 -> 8..15 for certain groups
     if copy_missing_weights:
         to_replace = ["gating", "linears", "depformer_in", "depformer_emb"]
         for name in model_sd.keys():
@@ -328,37 +336,41 @@ def _get_moshi_lm_with_offload(
             if not replaced:
                 logger.warning(f"Missing {name}")
 
-    model.load_state_dict(state_dict, strict=False, assign=True)
+    del model_sd
 
-    # Determine target device
-    dev = torch.device(device) if isinstance(device, str) else device
+    # Cast all weights to the target dtype, keep on CPU
+    for key in state_dict:
+        state_dict[key] = state_dict[key].to(dtype=dtype)
+
+    # Step 3: Load state dict into meta model (assign=True replaces meta params with real CPU tensors)
+    logger.info("Loading state dict into model")
+    model.load_state_dict(state_dict, strict=False, assign=True)
+    del state_dict
+    gc.collect()
+
+    # Ensure all parameters are on CPU (convert any remaining meta tensors)
+    model = model.to(device="cpu", dtype=dtype)
 
     if dev.type != "cuda":
-        # If not using CUDA, just move to the target device without offloading
-        logger.info(f"CPU offload requested but device is {dev}, skipping offload")
-        model.to(dev)
+        logger.info(f"CPU offload requested but device is {dev}, skipping dispatch")
         model.eval()
         return model
 
-    # Infer device map based on available GPU memory
+    # Step 4: Compute device map and dispatch across GPU/CPU
+    logger.info("Computing device map for GPU/CPU split")
+    max_memory = {0: "5GiB", "cpu": "24GiB"}
     device_map = infer_auto_device_map(
         model,
-        max_memory=None,  # Let accelerate auto-detect available memory
+        max_memory=max_memory,
         no_split_module_classes=["StreamingTransformerLayer"],
-        dtype=dtype,
     )
+    logger.info(f"Device map summary: {dict((d, list(device_map.values()).count(d)) for d in set(device_map.values()))}")
 
-    # Log the device distribution
-    gpu_layers = sum(1 for v in device_map.values() if v == 0 or v == "cuda:0")
-    cpu_layers = sum(1 for v in device_map.values() if v == "cpu")
-    logger.info(f"Device map: {gpu_layers} modules on GPU, {cpu_layers} modules on CPU")
-
-    # Dispatch model across devices
-    model = dispatch_model(
-        model,
-        device_map=device_map,
-        offload_dir="offload_weights",  # Directory for disk offload if needed
-    )
+    model = dispatch_model(model, device_map)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     model.eval()
+    logger.info("Model loaded with CPU offloading")
     return model

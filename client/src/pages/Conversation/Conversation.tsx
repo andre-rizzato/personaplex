@@ -13,6 +13,60 @@ import { ModelParamsValues, useModelParams } from "./hooks/useModelParams";
 import fixWebmDuration from "webm-duration-fix";
 import { getMimeType, getExtension } from "./getMimeType";
 import { type ThemeType } from "./hooks/useSystemTheme";
+import { WSMessage } from "../../protocol/types";
+
+type ProgressStep = {
+  step: string;
+  status: "running" | "done" | "started";
+  detail: string;
+  elapsed: number;
+};
+
+const STEP_LABELS: Record<string, string> = {
+  init: "Initializing",
+  voice_prompt: "Voice Prompt",
+  audio_silence_1: "Audio Silence",
+  text_prompt: "Text Prompt",
+  audio_silence_2: "Audio Silence",
+  ready: "Ready",
+};
+
+const ProgressPanel: FC<{ steps: ProgressStep[] }> = ({ steps }) => {
+  if (steps.length === 0) return null;
+  const latest = steps[steps.length - 1];
+  const isReady = latest.step === "ready" && latest.status === "done";
+  return (
+    <div className="w-full max-w-md mx-auto my-4 p-4 rounded-lg bg-base-200 shadow text-sm font-mono">
+      <div className="font-bold text-base mb-2">System Prompt Processing</div>
+      <div className="space-y-1">
+        {steps.map((s, i) => {
+          const label = STEP_LABELS[s.step] || s.step;
+          const icon = s.status === "done" ? "\u2705" : s.status === "running" ? "\u23F3" : "\u2022";
+          return (
+            <div key={i} className={`flex items-center gap-2 ${s.status === "running" ? "text-warning" : s.status === "done" ? "text-success" : ""}`}>
+              <span>{icon}</span>
+              <span className="flex-1">{label}</span>
+              <span className="tabular-nums text-xs opacity-70">{s.elapsed.toFixed(1)}s</span>
+              {s.status === "done" && s.step !== "init" && s.step !== "ready" && (
+                <span className="text-xs opacity-50">({s.detail.match(/\([\d.]+s\)/)?.[0]?.slice(1,-1) || ""})</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {isReady && (
+        <div className="mt-2 pt-2 border-t border-base-300 text-success font-bold text-center">
+          Ready to talk! ({latest.elapsed.toFixed(1)}s total)
+        </div>
+      )}
+      {!isReady && (
+        <div className="mt-2 pt-2 border-t border-base-300 text-warning text-center animate-pulse">
+          Processing… {latest.elapsed.toFixed(1)}s elapsed
+        </div>
+      )}
+    </div>
+  );
+};
 
 type ConversationProps = {
   workerAddr: string;
@@ -44,16 +98,13 @@ const buildURL = ({
   textSeed: number;
   audioSeed: number;
 }) => {
-  const newWorkerAddr = useMemo(() => {
-    if (workerAddr == "same" || workerAddr == "") {
-      const newWorkerAddr = window.location.hostname + ":" + window.location.port;
-      console.log("Overriding workerAddr to", newWorkerAddr);
-      return newWorkerAddr;
-    }
-    return workerAddr;
-  }, [workerAddr]);
+  let resolvedAddr = workerAddr;
+  if (workerAddr === "same" || workerAddr === "") {
+    resolvedAddr = window.location.hostname + ":" + window.location.port;
+    console.log("Overriding workerAddr to", resolvedAddr);
+  }
   const wsProtocol = (window.location.protocol === 'https:') ? 'wss' : 'ws';
-  const url = new URL(`${wsProtocol}://${newWorkerAddr}/api/chat`);
+  const url = new URL(`${wsProtocol}://${resolvedAddr}/api/chat`);
   if(workerAuthId) {
     url.searchParams.append("worker_auth_id", workerAuthId);
   }
@@ -112,6 +163,7 @@ export const Conversation:FC<ConversationProps> = ({
   const textContainerRef = useRef<HTMLDivElement>(null);
   const textSeed = useMemo(() => Math.round(1000000 * Math.random()), []);
   const audioSeed = useMemo(() => Math.round(1000000 * Math.random()), []);
+  const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
 
   const WSURL = buildURL({
     workerAddr,
@@ -128,8 +180,20 @@ export const Conversation:FC<ConversationProps> = ({
     stopRecording();
   }, [setIsOver]);
 
+  const onSocketMessage = useCallback((message: WSMessage) => {
+    if (message.type === "metadata" && message.data && typeof message.data === "object") {
+      const data = message.data as Record<string, unknown>;
+      if (data.kind === "progress") {
+        setProgressSteps(prev => [
+          ...prev.filter(s => !(s.step === data.step && s.status !== "done")),
+          { step: data.step as string, status: data.status as ProgressStep["status"], detail: data.detail as string, elapsed: data.elapsed as number },
+        ]);
+      }
+    }
+  }, []);
+
   const { socketStatus, sendMessage, socket, start, stop } = useSocket({
-    // onMessage,
+    onMessage: onSocketMessage,
     uri: WSURL,
     onDisconnect,
   });
@@ -204,6 +268,7 @@ export const Conversation:FC<ConversationProps> = ({
       } else {
         audioContext.current?.resume();
         if (socketStatus !== "connected") {
+          setProgressSteps([]);
           start();
         } else {
           stop();
@@ -251,6 +316,9 @@ export const Conversation:FC<ConversationProps> = ({
           </Button>
           <div className={`h-4 w-4 rounded-full ${socketColor}`} />
         </div>
+        {socketStatus === "connected" && progressSteps.length > 0 && (
+          <ProgressPanel steps={progressSteps} />
+        )}
         {audioContext.current && worklet.current && <MediaContext.Provider value={
           {
             startRecording,

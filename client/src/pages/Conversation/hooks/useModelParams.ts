@@ -46,8 +46,8 @@ export const useModelParams = (params?:useModelParamsArgs) => {
     setAudioTemperatureBase(DEFAULT_AUDIO_TEMPERATURE);
     setAudioTopkBase(DEFAULT_AUDIO_TOPK);
     setPadMultBase(DEFAULT_PAD_MULT);
-    setRepetitionPenalty(DEFAULT_REPETITION_PENALTY);
-    setRepetitionPenaltyContext(DEFAULT_REPETITION_PENALTY_CONTEXT);
+    setRepetitionPenaltyBase(DEFAULT_REPETITION_PENALTY);
+    setRepetitionPenaltyContextBase(DEFAULT_REPETITION_PENALTY_CONTEXT);
   }, [
     setTextTemperatureBase,
     setTextTopkBase,
@@ -83,37 +83,37 @@ export const useModelParams = (params?:useModelParamsArgs) => {
   ]);
 
   const setTextTemperature = useCallback((value: number) => {
-    if(value <= 1.2 || value >= 0.2) {
+    if(value <= 1.2 && value >= 0.2) {
       setTextTemperatureBase(value);
     }
   }, []);
   const setTextTopk = useCallback((value: number) => {
-    if(value <= 500 || value >= 10) {
+    if(value <= 500 && value >= 10) {
       setTextTopkBase(value);
     }
   }, []);
   const setAudioTemperature = useCallback((value: number) => {
-    if(value <= 1.2 || value >= 0.2) {
+    if(value <= 1.2 && value >= 0.2) {
       setAudioTemperatureBase(value);
     }
   }, []);
   const setAudioTopk = useCallback((value: number) => {
-    if(value <= 500 || value >= 10) {
+    if(value <= 500 && value >= 10) {
       setAudioTopkBase(value);
     }
   }, []);
   const setPadMult = useCallback((value: number) => {
-    if(value <= 4 || value >= -4) {
+    if(value <= 4 && value >= -4) {
       setPadMultBase(value);
     }
   }, []);
   const setRepetitionPenalty = useCallback((value: number) => {
-    if(value <= 2.0 || value >= 1.0) {
+    if(value <= 2.0 && value >= 1.0) {
       setRepetitionPenaltyBase(value);
     }
   }, []);
   const setRepetitionPenaltyContext = useCallback((value: number) => {
-    if(value <= 200|| value >= 0) {
+    if(value <= 200 && value >= 0) {
       setRepetitionPenaltyContextBase(value);
     }
   }, []);

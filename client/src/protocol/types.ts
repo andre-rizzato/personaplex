@@ -3,7 +3,9 @@ export type MessageType =
   | "audio"
   | "text"
   | "control"
-  | "metadata";
+  | "metadata"
+  | "error"
+  | "ping";
 
 export const VERSIONS_MAP = {
   0: 0b00000000,

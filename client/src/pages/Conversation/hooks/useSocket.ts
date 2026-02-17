@@ -33,12 +33,6 @@ export const useSocket = ({
 
   const onDisconnect = useCallback((event: CloseEvent) => {
     const closedSocket = event.target as WebSocket;
-    console.log("disconnected");
-    setSocketStatus("disconnected");
-    if (onDisconnectProp) {
-      onDisconnectProp();
-    }
-    // ONLY clear socketRef.current if it's the one that closed
     if (socketRef.current === closedSocket) {
       console.log("disconnected (current socket)");
       socketRef.current = null;
@@ -46,6 +40,7 @@ export const useSocket = ({
       onDisconnectProp?.();
     } else {
       console.log("disconnected (stale socket ignored)");
+      setSocketStatus("disconnected");
     }
   }, [onDisconnectProp]);
 
@@ -101,7 +96,7 @@ export const useSocket = ({
       return;
     }
     const intervalId = setInterval(() => {
-      if (lastMessageTime.current && Date.now() - lastMessageTime.current > 10000) {
+      if (lastMessageTime.current && Date.now() - lastMessageTime.current > 120000) {
         console.log("closing socket due to inactivity", socketRef.current);
         socketRef.current?.close();
         // onDisconnect();

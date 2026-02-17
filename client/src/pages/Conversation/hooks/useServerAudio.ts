@@ -82,19 +82,19 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     [onDecode],
   );
 
-  let midx = 0;
+  const midxRef = useRef(0);
   const decodeAudio = useCallback((data: Uint8Array) => {
     if (!decoderWorker.current) {
       console.warn("Decoder worker not ready, dropping audio packet");
       return;
     }
-    if (midx < 5) {
+    if (midxRef.current < 5) {
       // Log first few packets with size info for debugging
       const hasOggS = data.length >= 4 && 
         data[0] === 0x4F && data[1] === 0x67 && data[2] === 0x67 && data[3] === 0x53;
       console.log(Date.now() % 1000, "Got NETWORK message", 
         micDuration.current - workletStats.current.actualAudioPlayed, 
-        midx++, 
+        midxRef.current++, 
         "size:", data.length, 
         "hasOggS:", hasOggS);
     }
